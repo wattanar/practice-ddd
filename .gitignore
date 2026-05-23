@@ -1,7 +1,4 @@
 bin/
-orders.db
-orders.db-shm
-orders.db-wal
-test.db
-test.db-shm
-test.db-wal
+*.db
+*.db-shm
+*.db-wal
