@@ -9,11 +9,14 @@ import (
 	"os/signal"
 	"time"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+	appcache "practice-ddd/internal/application/cache"
 	apporder "practice-ddd/internal/application/order"
 	"practice-ddd/internal/domain/customer"
 	"practice-ddd/internal/domain/order"
 	"practice-ddd/internal/domain/product"
 	"practice-ddd/internal/domain/shared"
+	infocache "practice-ddd/internal/infrastructure/cache"
 	"practice-ddd/internal/infrastructure/persistence/sqlite"
 	"practice-ddd/internal/infrastructure/rest"
 )
@@ -67,6 +70,21 @@ func mustMoney(amount int64, currency string) shared.Money {
 	return m
 }
 
+func newRedisCache(ctx context.Context) (*redis.Client, bool) {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	client := redis.NewClient(&redis.Options{Addr: addr})
+	if err := client.Ping(ctx).Err(); err != nil {
+		client.Close()
+		log.Printf("Redis unavailable at %s, continuing without cache: %v", addr, err)
+		return nil, false
+	}
+	log.Printf("Redis cache enabled at %s", addr)
+	return client, true
+}
+
 func main() {
 	dbPath := "orders.db"
 	if len(os.Args) > 1 {
@@ -83,12 +101,20 @@ func main() {
 		log.Fatalf("Failed to migrate: %v", err)
 	}
 
-	customerRepo := sqlite.NewCustomerRepository(db)
-	productRepo := sqlite.NewProductRepository(db)
-	orderRepo := sqlite.NewOrderRepository(db)
+	var customerRepo customer.Repository = sqlite.NewCustomerRepository(db)
+	var productRepo product.Repository = sqlite.NewProductRepository(db)
+	var orderRepo order.Repository = sqlite.NewOrderRepository(db)
 	eventBus := &consoleEventBus{}
 
 	ctx := context.Background()
+	if client, ok := newRedisCache(ctx); ok {
+		defer client.Close()
+		ttl := 60 * time.Second
+		customerRepo = appcache.NewCachedCustomerRepository(customerRepo, infocache.NewRedisCache(client), ttl)
+		productRepo = appcache.NewCachedProductRepository(productRepo, infocache.NewRedisCache(client), ttl)
+		orderRepo = appcache.NewCachedOrderRepository(orderRepo, infocache.NewRedisCache(client), ttl)
+	}
+
 	seedData(ctx, customerRepo, productRepo)
 
 	placeOrder := apporder.NewPlaceOrderHandler(orderRepo, productRepo, customerRepo, eventBus)
